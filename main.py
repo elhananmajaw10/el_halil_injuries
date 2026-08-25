@@ -1,19 +1,53 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 import requests
 import json
 
-# Load environment variables
+
+# -----------------------------------
+# LOAD ENVIRONMENT VARIABLES
+# -----------------------------------
+
 load_dotenv()
+
+
+# -----------------------------------
+# FASTAPI APP
+# -----------------------------------
 
 app = FastAPI(
     title="Football Injury AI API",
-    description="Backend connecting ExerciseDB and Ollama"
+    description="Backend connecting ExerciseDB and Ollama",
+    version="1.0.0"
 )
 
-# Environment variables
+
+# -----------------------------------
+# CORS CONFIGURATION
+# -----------------------------------
+
+# Allows your local frontend (Vite) to communicate
+# with this FastAPI backend.
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# -----------------------------------
+# ENVIRONMENT VARIABLES
+# -----------------------------------
+
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
 OLLAMA_URL = os.getenv(
@@ -33,7 +67,7 @@ class InjuryRequest(BaseModel):
 
 
 # -----------------------------------
-# BASIC ENDPOINTS
+# BASIC ENDPOINT
 # -----------------------------------
 
 @app.get("/")
@@ -42,6 +76,10 @@ def home():
         "message": "Football Injury AI Backend is running"
     }
 
+
+# -----------------------------------
+# HEALTH CHECK
+# -----------------------------------
 
 @app.get("/health")
 def health():
@@ -56,7 +94,15 @@ def health():
 # -----------------------------------
 
 @app.get("/exercises/search")
-def search_exercises(query: str, threshold: float = 0.5):
+def search_exercises(
+    query: str,
+    threshold: float = 0.5
+):
+    if not RAPIDAPI_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="RAPIDAPI_KEY is not configured."
+        )
 
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -94,6 +140,12 @@ def search_exercises(query: str, threshold: float = 0.5):
 @app.get("/exercises/{exercise_id}")
 def get_exercise_details(exercise_id: str):
 
+    if not RAPIDAPI_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="RAPIDAPI_KEY is not configured."
+        )
+
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "Accept": "application/json"
@@ -124,18 +176,33 @@ def get_exercise_details(exercise_id: str):
 @app.post("/injury/analyze")
 def analyze_injury(request: InjuryRequest):
 
+    # -----------------------------------
+    # VALIDATE OLLAMA URL
+    # -----------------------------------
+
+    if not OLLAMA_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="OLLAMA_URL is not configured."
+        )
+
+    # -----------------------------------
+    # STEP 1: CREATE ROUTER PROMPT
+    # -----------------------------------
+
     router_prompt = f"""
 You are an API routing assistant for a football exercise and recovery application.
 
 Analyze the user's message and determine the most relevant exercise
 search keyword.
 
-Your task is to return a keyword that can be used to search the
-ExerciseDB exercise database.
+Your job is ONLY to identify the relevant exercise/body-area keyword
+for searching the ExerciseDB database.
 
 Examples:
 
 User: "I have pain in my hamstring after football"
+
 Response:
 {{
     "action": "search_exercises",
@@ -143,6 +210,7 @@ Response:
 }}
 
 User: "I want exercises for my calf"
+
 Response:
 {{
     "action": "search_exercises",
@@ -150,6 +218,7 @@ Response:
 }}
 
 User: "My quadriceps feels tight"
+
 Response:
 {{
     "action": "search_exercises",
@@ -165,12 +234,15 @@ Rules:
 - Do not include explanations.
 - Do not use markdown.
 - Do not include ```json.
+- The action must be "search_exercises".
+- The query must be a short ExerciseDB-friendly search term.
 """
+
 
     try:
 
         # -----------------------------------
-        # STEP 1: ASK OLLAMA FOR SEARCH QUERY
+        # STEP 2: ASK OLLAMA
         # -----------------------------------
 
         ollama_response = requests.post(
@@ -195,7 +267,10 @@ Rules:
         action = router_result.get("action")
         query = router_result.get("query")
 
-        # Validate Ollama result
+        # -----------------------------------
+        # VALIDATE OLLAMA RESPONSE
+        # -----------------------------------
+
         if action != "search_exercises" or not query:
             raise HTTPException(
                 status_code=400,
@@ -203,8 +278,14 @@ Rules:
             )
 
         # -----------------------------------
-        # STEP 2: SEARCH EXERCISEDB
+        # STEP 3: SEARCH EXERCISEDB
         # -----------------------------------
+
+        if not RAPIDAPI_KEY:
+            raise HTTPException(
+                status_code=500,
+                detail="RAPIDAPI_KEY is not configured."
+            )
 
         headers = {
             "x-rapidapi-key": RAPIDAPI_KEY,
@@ -229,7 +310,11 @@ Rules:
 
         exercises = search_data.get("data", [])
 
-        # Check if exercises were found
+
+        # -----------------------------------
+        # NO EXERCISES FOUND
+        # -----------------------------------
+
         if not exercises:
             return {
                 "user_message": request.message,
@@ -238,8 +323,9 @@ Rules:
                 "exercises": []
             }
 
+
         # -----------------------------------
-        # STEP 3: TAKE FIRST EXERCISE
+        # STEP 4: SELECT FIRST EXERCISE
         # -----------------------------------
 
         first_exercise = exercises[0]
@@ -249,11 +335,12 @@ Rules:
         if not exercise_id:
             raise HTTPException(
                 status_code=500,
-                detail="Exercise ID was not found."
+                detail="Exercise ID was not found in the search response."
             )
 
+
         # -----------------------------------
-        # STEP 4: GET FULL EXERCISE DETAILS
+        # STEP 5: GET FULL EXERCISE DETAILS
         # -----------------------------------
 
         details_response = requests.get(
@@ -266,8 +353,9 @@ Rules:
 
         exercise_details = details_response.json()
 
+
         # -----------------------------------
-        # STEP 5: RETURN CLEAN RESULT
+        # STEP 6: RETURN RESULT
         # -----------------------------------
 
         return {
@@ -276,13 +364,24 @@ Rules:
             "exercise": exercise_details
         }
 
+
+    # -----------------------------------
+    # ERROR HANDLING
+    # -----------------------------------
+
     except HTTPException:
         raise
 
+    except requests.exceptions.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail="A request to Ollama or ExerciseDB timed out."
+        )
+
     except requests.exceptions.RequestException as e:
         raise HTTPException(
-            status_code=500,
-            detail=f"API connection error: {str(e)}"
+            status_code=502,
+            detail=f"External API error: {str(e)}"
         )
 
     except json.JSONDecodeError:
